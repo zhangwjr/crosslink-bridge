@@ -6,17 +6,18 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 
-import {ICCIPRouter} from "./interfaces/ICCIPRouter.sol";
-import {ICCIPReceiver} from "./interfaces/ICCIPReceiver.sol";
+import {IAny2EVMMessageReceiver} from "./vendor/ccip/IAny2EVMMessageReceiver.sol";
+import {IRouterClient} from "./vendor/ccip/IRouterClient.sol";
+import {Client} from "./vendor/ccip/Client.sol";
 import {BridgeMessage} from "./libraries/BridgeMessage.sol";
 import {RateLimiter} from "./RateLimiter.sol";
 import {WrappedToken} from "./WrappedToken.sol";
 
 /// @title Bridge
-/// @notice Lock-Mint / Burn-Release cross-chain bridge for EVM chains
-/// @dev Uses a CCIP-compatible router interface; swap MockCCIPRouter for Chainlink CCIP on testnet
-contract Bridge is ICCIPReceiver, Ownable, Pausable, ReentrancyGuard, RateLimiter {
+/// @notice Lock-Mint / Burn-Release cross-chain bridge for EVM chains via Chainlink CCIP
+contract Bridge is IAny2EVMMessageReceiver, IERC165, Ownable, Pausable, ReentrancyGuard, RateLimiter {
     using SafeERC20 for IERC20;
 
     enum BridgeMode {
@@ -24,8 +25,11 @@ contract Bridge is ICCIPReceiver, Ownable, Pausable, ReentrancyGuard, RateLimite
         DESTINATION // mint wrapped tokens, burn on reverse bridge
     }
 
+    /// @dev Destination execution gas for mint/release handlers
+    uint256 public constant CCIP_GAS_LIMIT = 200_000;
+
     BridgeMode public immutable mode;
-    ICCIPRouter public router;
+    IRouterClient public router;
     IERC20 public nativeToken;
     WrappedToken public wrappedToken;
     uint64 public chainSelector;
@@ -54,6 +58,9 @@ contract Bridge is ICCIPReceiver, Ownable, Pausable, ReentrancyGuard, RateLimite
     error UnsupportedChain();
     error MessageAlreadyProcessed();
     error UnknownAction();
+    error InvalidRemoteSender();
+    error InsufficientFee(uint256 required, uint256 provided);
+    error FeeRefundFailed();
 
     modifier onlyRouter() {
         if (msg.sender != address(router)) revert NotRouter();
@@ -63,13 +70,22 @@ contract Bridge is ICCIPReceiver, Ownable, Pausable, ReentrancyGuard, RateLimite
     constructor(BridgeMode bridgeMode, address router_, uint64 chainSelector_, address initialOwner)
         Ownable(initialOwner)
     {
+        if (router_ == address(0)) revert ZeroAddress();
         mode = bridgeMode;
-        router = ICCIPRouter(router_);
+        router = IRouterClient(router_);
         chainSelector = chainSelector_;
     }
 
+    /// @notice Allow Bridge to receive native fee refunds / top-ups
+    receive() external payable {}
+
+    function supportsInterface(bytes4 interfaceId) public pure override returns (bool) {
+        return interfaceId == type(IAny2EVMMessageReceiver).interfaceId || interfaceId == type(IERC165).interfaceId;
+    }
+
     function setRouter(address router_) external onlyOwner {
-        router = ICCIPRouter(router_);
+        if (router_ == address(0)) revert ZeroAddress();
+        router = IRouterClient(router_);
         emit RouterUpdated(router_);
     }
 
@@ -90,9 +106,25 @@ contract Bridge is ICCIPReceiver, Ownable, Pausable, ReentrancyGuard, RateLimite
         emit RemoteBridgeUpdated(destChainSelector, bridge);
     }
 
+    /// @notice Quote native fee required to send a bridge message via CCIP
+    function getFee(uint256 amount, uint64 destChainSelector, address recipient) external view returns (uint256) {
+        if (amount == 0) revert ZeroAmount();
+        if (recipient == address(0)) revert ZeroAddress();
+
+        address remoteBridge = remoteBridges[destChainSelector];
+        if (remoteBridge == address(0)) revert UnsupportedChain();
+
+        bytes memory data = mode == BridgeMode.SOURCE
+            ? BridgeMessage.encodeMintRequest(recipient, amount)
+            : BridgeMessage.encodeReleaseRequest(recipient, amount);
+
+        return router.getFee(destChainSelector, _buildMessage(remoteBridge, data));
+    }
+
     /// @notice Lock native tokens on the source chain and request mint on destination
     function lock(uint256 amount, uint64 destChainSelector, address recipient)
         external
+        payable
         nonReentrant
         whenNotPaused
         returns (bytes32 messageId)
@@ -108,7 +140,7 @@ contract Bridge is ICCIPReceiver, Ownable, Pausable, ReentrancyGuard, RateLimite
         nativeToken.safeTransferFrom(msg.sender, address(this), amount);
 
         bytes memory data = BridgeMessage.encodeMintRequest(recipient, amount);
-        messageId = router.ccipSend(destChainSelector, remoteBridge, data);
+        messageId = _ccipSend(destChainSelector, remoteBridge, data);
 
         emit TokensLocked(msg.sender, amount, destChainSelector, recipient, messageId);
     }
@@ -116,6 +148,7 @@ contract Bridge is ICCIPReceiver, Ownable, Pausable, ReentrancyGuard, RateLimite
     /// @notice Burn wrapped tokens on the destination chain and request release on source
     function burn(uint256 amount, uint64 destChainSelector, address recipient)
         external
+        payable
         nonReentrant
         whenNotPaused
         returns (bytes32 messageId)
@@ -131,18 +164,23 @@ contract Bridge is ICCIPReceiver, Ownable, Pausable, ReentrancyGuard, RateLimite
         wrappedToken.burn(msg.sender, amount);
 
         bytes memory data = BridgeMessage.encodeReleaseRequest(recipient, amount);
-        messageId = router.ccipSend(destChainSelector, remoteBridge, data);
+        messageId = _ccipSend(destChainSelector, remoteBridge, data);
 
         emit TokensBurned(msg.sender, amount, destChainSelector, recipient, messageId);
     }
 
-    /// @inheritdoc ICCIPReceiver
-    function ccipReceive(Any2EVMMessage calldata message) external onlyRouter nonReentrant {
+    /// @inheritdoc IAny2EVMMessageReceiver
+    function ccipReceive(Client.Any2EVMMessage calldata message) external override onlyRouter nonReentrant {
         if (processedMessages[message.messageId]) revert MessageAlreadyProcessed();
         processedMessages[message.messageId] = true;
 
-        (BridgeMessage.Action action, address recipient, uint256 amount) =
-            BridgeMessage.decode(message.data);
+        address expectedSender = remoteBridges[message.sourceChainSelector];
+        if (expectedSender == address(0)) revert UnsupportedChain();
+
+        address actualSender = abi.decode(message.sender, (address));
+        if (actualSender != expectedSender) revert InvalidRemoteSender();
+
+        (BridgeMessage.Action action, address recipient, uint256 amount) = BridgeMessage.decode(message.data);
 
         if (action == BridgeMessage.Action.MINT) {
             if (mode != BridgeMode.DESTINATION) revert NotDestinationBridge();
@@ -167,5 +205,37 @@ contract Bridge is ICCIPReceiver, Ownable, Pausable, ReentrancyGuard, RateLimite
 
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    function _ccipSend(uint64 destChainSelector, address remoteBridge, bytes memory data)
+        internal
+        returns (bytes32 messageId)
+    {
+        Client.EVM2AnyMessage memory message = _buildMessage(remoteBridge, data);
+        uint256 fee = router.getFee(destChainSelector, message);
+        if (msg.value < fee) revert InsufficientFee(fee, msg.value);
+
+        messageId = router.ccipSend{value: fee}(destChainSelector, message);
+
+        if (msg.value > fee) {
+            (bool ok,) = msg.sender.call{value: msg.value - fee}("");
+            if (!ok) revert FeeRefundFailed();
+        }
+    }
+
+    function _buildMessage(address remoteBridge, bytes memory data)
+        internal
+        pure
+        returns (Client.EVM2AnyMessage memory)
+    {
+        return Client.EVM2AnyMessage({
+            receiver: abi.encode(remoteBridge),
+            data: data,
+            tokenAmounts: new Client.EVMTokenAmount[](0),
+            feeToken: address(0), // pay in native gas token
+            extraArgs: Client._argsToBytes(
+                Client.GenericExtraArgsV2({gasLimit: CCIP_GAS_LIMIT, allowOutOfOrderExecution: true})
+            )
+        });
     }
 }

@@ -13,8 +13,9 @@ import {WrappedToken} from "../src/WrappedToken.sol";
 ///   SOURCE:  BRIDGE_MODE=source forge script script/Deploy.s.sol:Deploy --rpc-url $SEPOLIA_RPC_URL --account deployer_1 --sender $DEPLOYER_ADDRESS --broadcast
 ///   DEST:    BRIDGE_MODE=dest   forge script script/Deploy.s.sol:Deploy --rpc-url $BSC_TESTNET_RPC_URL --account deployer_1 --sender $DEPLOYER_ADDRESS --broadcast
 contract Deploy is Script {
-    uint64 internal constant SEPOLIA_SELECTOR = 11155111;
-    uint64 internal constant BSC_TESTNET_SELECTOR = 97;
+    /// @dev Official Chainlink CCIP chain selectors (not EVM chainIds)
+    uint64 internal constant SEPOLIA_SELECTOR = 16015286601757825753;
+    uint64 internal constant BSC_TESTNET_SELECTOR = 13264668187771770619;
 
     function run() external {
         string memory mode = vm.envOr("BRIDGE_MODE", string("source"));
@@ -43,7 +44,7 @@ contract Deploy is Script {
 
         console2.log("Source Token:", address(token));
         console2.log("Source Bridge:", address(bridge));
-        console2.log("Chain Selector:", SEPOLIA_SELECTOR);
+        console2.log("CCIP Chain Selector:", SEPOLIA_SELECTOR);
     }
 
     function _deployDestination(address deployer, address router) internal {
@@ -55,7 +56,7 @@ contract Deploy is Script {
 
         console2.log("Wrapped Token:", address(wrapped));
         console2.log("Destination Bridge:", address(bridge));
-        console2.log("Chain Selector:", BSC_TESTNET_SELECTOR);
+        console2.log("CCIP Chain Selector:", BSC_TESTNET_SELECTOR);
     }
 
     function _eq(string memory a, string memory b) private pure returns (bool) {

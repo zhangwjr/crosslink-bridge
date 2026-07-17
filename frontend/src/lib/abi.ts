@@ -46,7 +46,7 @@ export const bridgeAbi = [
   {
     type: "function",
     name: "lock",
-    stateMutability: "nonpayable",
+    stateMutability: "payable",
     inputs: [
       { name: "amount", type: "uint256" },
       { name: "destChainSelector", type: "uint64" },
@@ -57,13 +57,24 @@ export const bridgeAbi = [
   {
     type: "function",
     name: "burn",
-    stateMutability: "nonpayable",
+    stateMutability: "payable",
     inputs: [
       { name: "amount", type: "uint256" },
       { name: "destChainSelector", type: "uint64" },
       { name: "recipient", type: "address" },
     ],
     outputs: [{ name: "messageId", type: "bytes32" }],
+  },
+  {
+    type: "function",
+    name: "getFee",
+    stateMutability: "view",
+    inputs: [
+      { name: "amount", type: "uint256" },
+      { name: "destChainSelector", type: "uint64" },
+      { name: "recipient", type: "address" },
+    ],
+    outputs: [{ type: "uint256" }],
   },
   {
     type: "function",

@@ -195,11 +195,19 @@ export function useBridge() {
       const functionName =
         chainConfig.mode === "source" ? "lock" : "burn";
 
+      const fee = await publicClient.readContract({
+        address: chainConfig.bridgeAddress,
+        abi: bridgeAbi,
+        functionName: "getFee",
+        args: [parsedAmount, chainConfig.remoteChainSelector, targetRecipient],
+      });
+
       const hash = await walletClient.writeContract({
         address: chainConfig.bridgeAddress,
         abi: bridgeAbi,
         functionName,
         args: [parsedAmount, chainConfig.remoteChainSelector, targetRecipient],
+        value: fee,
         chain: walletClient.chain,
         account: address,
       });

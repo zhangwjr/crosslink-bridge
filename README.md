@@ -1,6 +1,6 @@
 # CrossLink Bridge
 
-EVM 跨链 Token 桥（Lock-Mint / Burn-Release），基于 **Foundry** 开发，使用 CCIP 兼容接口进行跨链消息传递。
+EVM 跨链 Token 桥（Lock-Mint / Burn-Release），基于 **Foundry** 开发，通过 **Chainlink CCIP** 传递跨链消息。
 
 ## 架构
 
@@ -16,13 +16,16 @@ Sepolia (SOURCE)                         BSC Testnet (DESTINATION)
 
 ## 合约模块
 
-| 合约 | 说明 |
-|------|------|
-| `Bridge.sol` | 跨链入口：lock / burn / ccipReceive |
-| `WrappedToken.sol` | 目标链包装 Token，仅 Bridge 可 mint/burn |
-| `Token.sol` | 源链原生 ERC-20 |
-| `RateLimiter.sol` | 全局/用户每日跨链限额 |
-| `MockCCIPRouter.sol` | 本地测试用 CCIP 路由器 |
+
+| 合约                   | 说明                               |
+| -------------------- | -------------------------------- |
+| `Bridge.sol`         | 跨链入口：payable lock / burn / ccipReceive |
+| `WrappedToken.sol`   | 目标链包装 Token，仅 Bridge 可 mint/burn |
+| `Token.sol`          | 源链原生 ERC-20                      |
+| `RateLimiter.sol`    | 全局/用户每日跨链限额                      |
+| `MockCCIPRouter.sol` | 本地测试用 IRouterClient 实现           |
+| `src/vendor/ccip/`   | 精简版 Chainlink CCIP 接口与 Client 库  |
+
 
 ## 快速开始
 
@@ -56,34 +59,53 @@ forge test --gas-report
 cp .env.example .env
 ```
 
-2. 填写 `PRIVATE_KEY`、RPC URL、CCIP Router 地址。
+1. 填写 RPC URL、CCIP Router 地址（keystore 或私钥）。
 
-3. 部署源链（Sepolia）：
+官方 Router / CCIP selector：
+
+| 链 | Router | CCIP Selector |
+|----|--------|---------------|
+| Sepolia | `0x0BF3dE8c5D3e8A2B34D2BEeB17ABfCeBaf363A59` | `16015286601757825753` |
+| BSC Testnet | `0xE1053aE1857476f36A3C62580FF9b016E8EE8F6f` | `13264668187771770619` |
+
+2. 部署源链（Sepolia）：
 
 ```bash
 BRIDGE_MODE=source forge script script/Deploy.s.sol:Deploy \
   --rpc-url $SEPOLIA_RPC_URL \
-  --broadcast \
-  --verify
+  --account deployer_1 \
+  --sender $DEPLOYER_ADDRESS \
+  --broadcast
 ```
 
-4. 部署目标链（BSC Testnet）：
+3. 部署目标链（BSC Testnet）：
 
 ```bash
-BRIDGE_MODE=dest forge script script/Deploy.s.sol:Deploy \
+BRIDGE_MODE=dest \
+CCIP_ROUTER=0xE1053aE1857476f36A3C62580FF9b016E8EE8F6f \
+forge script script/Deploy.s.sol:Deploy \
   --rpc-url $BSC_TESTNET_RPC_URL \
-  --broadcast \
-  --verify
+  --account deployer_1 \
+  --sender $DEPLOYER_ADDRESS \
+  --broadcast
 ```
 
-5. 互设远程 Bridge 地址：
+4. 互设远程 Bridge 地址（使用 **CCIP selector**，不是 chainId）：
 
 ```bash
-# 在源链 Bridge 上设置 BSC Bridge 地址
-cast send <SOURCE_BRIDGE> "setRemoteBridge(uint64,address)" 97 <DEST_BRIDGE> --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY
+# Sepolia Bridge → BSC Bridge
+cast send <SOURCE_BRIDGE> \
+  "setRemoteBridge(uint64,address)" \
+  13264668187771770619 <DEST_BRIDGE> \
+  --rpc-url $SEPOLIA_RPC_URL \
+  --account deployer_1
 
-# 在目标链 Bridge 上设置 Sepolia Bridge 地址
-cast send <DEST_BRIDGE> "setRemoteBridge(uint64,address)" 11155111 <SOURCE_BRIDGE> --rpc-url $BSC_TESTNET_RPC_URL --private-key $PRIVATE_KEY
+# BSC Bridge → Sepolia Bridge
+cast send <DEST_BRIDGE> \
+  "setRemoteBridge(uint64,address)" \
+  16015286601757825753 <SOURCE_BRIDGE> \
+  --rpc-url $BSC_TESTNET_RPC_URL \
+  --account deployer_1
 ```
 
 ## 跨链流程
@@ -91,18 +113,19 @@ cast send <DEST_BRIDGE> "setRemoteBridge(uint64,address)" 11155111 <SOURCE_BRIDG
 ### 正向（Sepolia → BSC）
 
 1. 用户 `approve` 源链 Token 给 Bridge
-2. 调用 `lock(amount, BSC_SELECTOR, recipient)`
-3. CCIP 消息到达 BSC，Bridge 铸造 `wCLT`
+2. 调用 `getFee` 估算 CCIP 原生手续费，再 `lock{value: fee}(amount, BSC_CCIP_SELECTOR, recipient)`
+3. CCIP 消息到达 BSC，Bridge 校验远端 sender 后铸造 `wCLT`
 
 ### 反向（BSC → Sepolia）
 
-1. 用户调用 `burn(amount, SEPOLIA_SELECTOR, recipient)`
+1. 用户调用 `burn{value: fee}(amount, SEPOLIA_CCIP_SELECTOR, recipient)`
 2. CCIP 消息到达 Sepolia，Bridge 释放锁定的 CLT
 
 ## 安全特性
 
 - `processedMessages` 防重放
 - `onlyRouter` 限制 `ccipReceive` 调用方
+- 校验 `message.sender == remoteBridges[sourceChainSelector]`
 - `ReentrancyGuard` 防重入
 - `Pausable` 紧急暂停
 - `RateLimiter` 每日限额
@@ -135,19 +158,11 @@ npm install
 npm run dev
 ```
 
-打开 http://localhost:3000 ，连接 MetaMask 后即可：
+打开 [http://localhost:3000](http://localhost:3000) ，连接 MetaMask 后即可：
 
 - 在 **Sepolia** 上执行 Lock（锁定 CLT → BSC 铸造 wCLT）
 - 在 **BSC Testnet** 上执行 Burn（销毁 wCLT → Sepolia 释放 CLT）
 
-## 下一步
-
-- [ ] 对接真实 Chainlink CCIP Router（替换 Mock）
-- [ ] Sepolia ↔ BSC Testnet 端到端联调
-
 ## License
 
 MIT
-
-## 源头链地址：
- https://sepolia.etherscan.io/address/0x7919bd30dd1fed2c77eac53474ee5f3025d1979a

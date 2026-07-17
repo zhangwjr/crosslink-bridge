@@ -4,8 +4,9 @@ export const SUPPORTED_CHAINS = [sepolia, bscTestnet] as const;
 
 export type SupportedChain = (typeof SUPPORTED_CHAINS)[number];
 
-export const SEPOLIA_CHAIN_SELECTOR = 11155111n;
-export const BSC_CHAIN_SELECTOR = 97n;
+/** Official Chainlink CCIP selectors (not EVM chainIds) */
+export const SEPOLIA_CHAIN_SELECTOR = 16015286601757825753n;
+export const BSC_CHAIN_SELECTOR = 13264668187771770619n;
 
 export type BridgeMode = "source" | "destination";
 
