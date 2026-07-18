@@ -68,8 +68,8 @@ export function useBridge() {
 
     try {
       const [tokenCode, bridgeCode] = await Promise.all([
-        publicClient.getBytecode({ address: chainConfig.tokenAddress }),
-        publicClient.getBytecode({ address: chainConfig.bridgeAddress }),
+        publicClient.getCode({ address: chainConfig.tokenAddress }),
+        publicClient.getCode({ address: chainConfig.bridgeAddress }),
       ]);
 
       if (!tokenCode || !bridgeCode) {
