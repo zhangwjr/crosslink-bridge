@@ -1,6 +1,8 @@
 # CrossLink Bridge
 
-EVM 跨链 Token 桥（Lock-Mint / Burn-Release），基于 **Foundry** 开发，通过 **Chainlink CCIP** 传递跨链消息。
+EVM 跨链 Token 桥（Lock-Mint / Burn-Release），基于 **Foundry** 开发，通过 **[Chainlink CCIP](https://docs.chain.link/ccip)** 传递跨链消息。
+
+> 测试网 Demo，未经审计，请勿用于主网或真实资金。
 
 ## 架构
 
@@ -14,23 +16,29 @@ Sepolia (SOURCE)                         BSC Testnet (DESTINATION)
 └──────────────────┘                   └──────────────────┘
 ```
 
+## 前置依赖
+
+- [Foundry](https://book.getfoundry.sh/getting-started/installation)
+- Node.js 20+（前端）
+- MetaMask（或兼容钱包）
+- 测试网 gas：Sepolia ETH、BSC Testnet BNB
+
 ## 合约模块
 
-
-| 合约                   | 说明                               |
-| -------------------- | -------------------------------- |
-| `Bridge.sol`         | 跨链入口：payable lock / burn / ccipReceive |
-| `WrappedToken.sol`   | 目标链包装 Token，仅 Bridge 可 mint/burn |
-| `Token.sol`          | 源链原生 ERC-20                      |
-| `RateLimiter.sol`    | 全局/用户每日跨链限额                      |
-| `MockCCIPRouter.sol` | 本地测试用 IRouterClient 实现           |
-| `src/vendor/ccip/`   | 精简版 Chainlink CCIP 接口与 Client 库  |
-
+| 合约 | 说明 |
+| ---- | ---- |
+| `Bridge.sol` | 跨链入口：payable `lock` / `burn` / `ccipReceive` |
+| `WrappedToken.sol` | 目标链包装 Token，仅 Bridge 可 mint/burn |
+| `Token.sol` | 源链原生 ERC-20（CLT） |
+| `RateLimiter.sol` | 全局 / 用户每日跨链限额 |
+| `libraries/BridgeMessage.sol` | 跨链消息编解码 |
+| `mocks/MockCCIPRouter.sol` | 本地测试用 `IRouterClient` 实现 |
+| `vendor/ccip/` | 精简版 Chainlink CCIP 接口与 Client 库 |
 
 ## 快速开始
 
 ```bash
-# 安装依赖（已包含 OpenZeppelin）
+# 安装依赖（含 forge-std、OpenZeppelin）
 forge install
 
 # 编译
@@ -39,7 +47,7 @@ forge build
 # 测试
 forge test -vv
 
-# 查看 Gas 报告
+# Gas 报告
 forge test --gas-report
 ```
 
@@ -51,27 +59,39 @@ forge test --gas-report
 - BSC → Sepolia：`burn` 销毁包装 Token，源链释放原生 Token
 - 重放攻击防护、权限校验、暂停、限额
 
-## 测试网部署
-
-1. 复制环境变量：
+## 环境变量
 
 ```bash
 cp .env.example .env
 ```
 
-1. 填写 RPC URL、CCIP Router 地址（keystore 或私钥）。
+| 变量 | 说明 |
+| ---- | ---- |
+| `SEPOLIA_RPC_URL` / `BSC_TESTNET_RPC_URL` | 测试网 RPC |
+| `DEPLOYER_ADDRESS` | Foundry keystore 对应地址（`--sender`） |
+| `BRIDGE_MODE` | `source`（Sepolia）或 `dest`（BSC Testnet） |
+| `CCIP_ROUTER` | **当前部署链** 的 CCIP Router（两种模式都必填） |
+| `ETHERSCAN_API_KEY` / `BSCSCAN_API_KEY` | 可选，合约验证 |
 
-官方 Router / CCIP selector：
+官方 Router / CCIP selector（**不是** EVM `chainId`）：
 
 | 链 | Router | CCIP Selector |
-|----|--------|---------------|
+| ---- | ---- | ---- |
 | Sepolia | `0x0BF3dE8c5D3e8A2B34D2BEeB17ABfCeBaf363A59` | `16015286601757825753` |
 | BSC Testnet | `0xE1053aE1857476f36A3C62580FF9b016E8EE8F6f` | `13264668187771770619` |
+
+## 测试网部署
+
+推荐用 Foundry keystore 签名（`--account`）。私钥方式也可，自行替换 CLI 参数。
+
+1. 配置 `.env`（见上表），并确保 account 有对应链测试币。
 
 2. 部署源链（Sepolia）：
 
 ```bash
-BRIDGE_MODE=source forge script script/Deploy.s.sol:Deploy \
+BRIDGE_MODE=source \
+CCIP_ROUTER=0x0BF3dE8c5D3e8A2B34D2BEeB17ABfCeBaf363A59 \
+forge script script/Deploy.s.sol:Deploy \
   --rpc-url $SEPOLIA_RPC_URL \
   --account deployer_1 \
   --sender $DEPLOYER_ADDRESS \
@@ -90,7 +110,9 @@ forge script script/Deploy.s.sol:Deploy \
   --broadcast
 ```
 
-4. 互设远程 Bridge 地址（使用 **CCIP selector**，不是 chainId）：
+脚本会打印 Token / Bridge 地址。部署脚本已自动调用 `setNativeToken` / `setWrappedToken` / `setBridge`。
+
+4. 互设远程 Bridge（使用 **CCIP selector**）：
 
 ```bash
 # Sepolia Bridge → BSC Bridge
@@ -107,6 +129,21 @@ cast send <DEST_BRIDGE> \
   --rpc-url $BSC_TESTNET_RPC_URL \
   --account deployer_1
 ```
+
+5. 部署后：
+
+- 将地址填入 `frontend/.env.local`（见下方「前端开发」）
+- 跨链消息可在 [CCIP Explorer](https://ccip.chain.link) 查询
+- 可选：`forge verify-contract` 验证源码
+
+### 当前测试网地址
+
+| 链 | 合约 | 地址 |
+| ---- | ---- | ---- |
+| Sepolia | Token (CLT) | `0xD5Cab8F37c52bF055B17C3637caeaF8E45491478` |
+| Sepolia | Bridge | `0x66571e125B8D245e5C41959C911E5241e7AAa5F9` |
+| BSC Testnet | WrappedToken (wCLT) | `0x00051ec7574277c4157a5641538922a8E925c270` |
+| BSC Testnet | Bridge | `0x433cA782E648B70e96436Ae058C1e58BD99C0f13` |
 
 ## 跨链流程
 
@@ -134,16 +171,20 @@ cast send <DEST_BRIDGE> \
 
 ```text
 crosslink-bridge/
-├── src/                        # Foundry 合约
+├── src/
+│   ├── Bridge.sol
+│   ├── Token.sol
+│   ├── WrappedToken.sol
+│   ├── RateLimiter.sol
+│   ├── libraries/BridgeMessage.sol
+│   ├── mocks/MockCCIPRouter.sol
+│   └── vendor/ccip/
 ├── test/
-├── script/
-├── frontend/                   # Next.js DApp 前端
-│   ├── src/
-│   │   ├── app/
-│   │   ├── components/
-│   │   ├── hooks/
-│   │   └── lib/
+├── script/Deploy.s.sol
+├── frontend/                   # Next.js DApp
+│   ├── src/{app,components,hooks,lib}/
 │   └── .env.example
+├── .env.example
 └── foundry.toml
 ```
 
@@ -152,16 +193,25 @@ crosslink-bridge/
 ```bash
 cd frontend
 cp .env.example .env.local
-# 填写 Sepolia / BSC Testnet 的 Bridge 与 Token 地址
+# 填入两侧 Bridge / Token 地址（可使用上文「当前测试网地址」）
 
 npm install
 npm run dev
 ```
 
-打开 [http://localhost:3000](http://localhost:3000) ，连接 MetaMask 后即可：
+| 变量 | 说明 |
+| ---- | ---- |
+| `NEXT_PUBLIC_SEPOLIA_BRIDGE_ADDRESS` | Sepolia Bridge |
+| `NEXT_PUBLIC_SEPOLIA_TOKEN_ADDRESS` | Sepolia CLT |
+| `NEXT_PUBLIC_BSC_BRIDGE_ADDRESS` | BSC Bridge |
+| `NEXT_PUBLIC_BSC_WRAPPED_TOKEN_ADDRESS` | BSC wCLT |
+| `NEXT_PUBLIC_SEPOLIA_RPC_URL` | 可选 |
+| `NEXT_PUBLIC_BSC_TESTNET_RPC_URL` | 可选 |
 
-- 在 **Sepolia** 上执行 Lock（锁定 CLT → BSC 铸造 wCLT）
-- 在 **BSC Testnet** 上执行 Burn（销毁 wCLT → Sepolia 释放 CLT）
+打开 [http://localhost:3000](http://localhost:3000)，连接钱包后：
+
+- 在 **Sepolia** 上 Lock（CLT → BSC 铸造 wCLT）
+- 在 **BSC Testnet** 上 Burn（wCLT → Sepolia 释放 CLT）
 
 ## License
 

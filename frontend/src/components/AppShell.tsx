@@ -11,8 +11,8 @@ export function AppShell() {
         <header className="border-b border-zinc-200 bg-white">
           <div className="mx-auto flex max-w-5xl flex-col gap-4 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <p className="text-sm font-medium text-indigo-600">CrossLink Bridge</p>
-              <h1 className="text-xl font-semibold text-zinc-900">
+              <p className="text-lg font-medium text-indigo-600">CrossLink Bridge</p>
+              <h1 className="text-2xl font-semibold text-zinc-900">
                 EVM 跨链 Token 桥
               </h1>
               <p className="mt-1 text-sm text-zinc-500">
